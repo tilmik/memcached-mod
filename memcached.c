@@ -2385,6 +2385,14 @@ typedef struct token_s {
 
 #define MAX_TOKENS 8
 
+/* Viz: To support the sub command coming from PHP getMulti */
+#define VIZ_MAX_VALUE_LEN 2048 //FIXME
+#define VIZ_COMMAND_TOKEN 2
+#define VIZ_RGET_CC_TOKEN 3
+#define VIZ_MERGE_FID_TOKEN 3
+#define VIZ_MERGE_VAL_TOKEN 4
+/* Viz: END */
+
 /*
  * Tokenize the command string by replacing whitespace with '\0' and update
  * the token array tokens with pointer to start of each token and length.
@@ -2858,6 +2866,480 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
     return;
 }
 
+/* Viz: Definition of rget command processor. Mostly copied from process_get_command */
+static inline void process_rget_command(conn *c, token_t *tokens, size_t ntokens, bool return_cas) {
+	char *key;
+	size_t nkey;
+	int i = 0, j, k;
+	item *it, *orig_it;
+	token_t *key_token = &tokens[KEY_TOKEN];
+	char *suffix;
+	const int max_call_count_length = 2;
+	char call_count_string[8];
+	int call_count = -1;
+	token_t *call_count_token = &tokens[KEY_TOKEN + 1];
+	char value[VIZ_MAX_VALUE_LEN], value2key[VIZ_MAX_VALUE_LEN];
+	char *value_ptr;
+	int value_len;
+	assert(c != NULL);
+	/* Viz: Outer do-while and while loops are not needed as we will request rget with only one key (for now) */
+
+	key = key_token->value;
+	nkey = key_token->length;
+	if(nkey > KEY_MAX_LENGTH) {
+		out_string(c, "CLIENT_ERROR bad command line format");
+		return;
+	}
+	
+	/* Viz: We differ at this point from process_get_command
+	 *		Instead of a single item_get, we call it multiple times
+	 *		Each call has key as the value extracted from previous call
+	 */
+	if(call_count_token->length > max_call_count_length){
+		out_string(c, "CLIENT_ERROR call count argument is too long");
+		return;
+	}
+	for(j = 0, k = 0;j < call_count_token->length;j++){
+		if(call_count_token->value[j] < '0' || call_count_token->value[j] > '9'){
+			out_string(c, "CLIENT_ERROR bad call count argument format");
+			return;
+		}
+		call_count_string[k++] = call_count_token->value[j];
+	}
+	call_count_string[k] = 0;
+	call_count = atoi(call_count_string);
+	//fprintf(stdout, "Call count %d\n", call_count);
+
+	k = 1;
+	do{
+		it = item_get(key, nkey);
+		if(!it)
+			break;
+		if(k == 1)
+			orig_it = it; // Keep the original item pointer, later needed for output
+		value_ptr = ITEM_data(it);
+		value_len = it->nbytes - 2; // There are CR and LF in the end
+		if(value_len > VIZ_MAX_VALUE_LEN - 1){
+			out_string(c, "CLIENT_ERROR value is too long for recursive get");
+			return;
+		}
+		for(j = 0;j < value_len;j++)
+			value[j] = value_ptr[j];
+		value[j] = 0;
+		//fprintf(stdout, "Value found %s\n", value);
+		nkey = (size_t) value_len;
+		memcpy(value2key, value, value_len);
+		key = value2key;
+	}while(k++ < call_count);
+
+	/* Viz: Rest of the function proceeds almost like process_get_item except few mods in the end */
+
+	if (settings.detail_enabled) {
+		stats_prefix_record_get(key, nkey, NULL != it);
+	}
+	if (it) {
+		if (i >= c->isize) {
+			item **new_list = realloc(c->ilist, sizeof(item *) * c->isize * 2);
+			if (new_list) {
+				c->isize *= 2;
+				c->ilist = new_list;
+			} else {
+				item_remove(it);
+				goto ENDOFWHILE;
+			}
+		}
+		/*
+		 * Construct the response. Each hit adds three elements to the
+		 * outgoing data list:
+		 *   "VALUE "
+		 *   key
+		 *   " " + flags + " " + data length + "\r\n" + data (with \r\n)
+		 */
+		if (return_cas){
+			MEMCACHED_COMMAND_GET(c->sfd, ITEM_key(it), it->nkey, it->nbytes, ITEM_get_cas(it));
+			/* Goofy mid-flight realloc. */
+			if (i >= c->suffixsize) {
+				char **new_suffix_list = realloc(c->suffixlist, sizeof(char *) * c->suffixsize * 2);
+				if (new_suffix_list) {
+					c->suffixsize *= 2;
+					c->suffixlist  = new_suffix_list;
+				} else {
+					item_remove(it);
+					goto ENDOFWHILE;
+				}
+			}
+			suffix = cache_alloc(c->thread->suffix_cache);
+			if (suffix == NULL) {
+				out_string(c, "SERVER_ERROR out of memory making CAS suffix");
+				item_remove(it);
+				return;
+			}
+			*(c->suffixlist + i) = suffix;
+			int suffix_len = snprintf(suffix, SUFFIX_SIZE,
+									" %llu\r\n",
+									(unsigned long long)ITEM_get_cas(it));
+			if (add_iov(c, "VALUE ", 6) != 0 ||
+				add_iov(c, ITEM_key(it), it->nkey) != 0 ||
+				add_iov(c, ITEM_suffix(it), it->nsuffix - 2) != 0 ||
+				add_iov(c, suffix, suffix_len) != 0 ||
+				add_iov(c, ITEM_data(it), it->nbytes) != 0){
+					item_remove(it);
+					goto ENDOFWHILE;
+			}
+		}
+		else
+		{
+			MEMCACHED_COMMAND_GET(c->sfd, ITEM_key(it), it->nkey, it->nbytes, ITEM_get_cas(it));
+			if (add_iov(c, "VALUE ", 6) != 0\
+				|| add_iov(c, ITEM_key(orig_it), orig_it->nkey) != 0
+				|| add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes) != 0){
+					item_remove(it);
+					goto ENDOFWHILE;
+			}
+		}
+		if (settings.verbose > 1)
+			fprintf(stderr, ">%d sending key %s\n", c->sfd, ITEM_key(it));
+		/* item_get() has incremented it->refcount for us */
+		pthread_mutex_lock(&c->thread->stats.mutex);
+		c->thread->stats.slab_stats[it->slabs_clsid].get_hits++;
+		c->thread->stats.get_cmds++;
+		pthread_mutex_unlock(&c->thread->stats.mutex);
+		item_update(it);
+		*(c->ilist + i) = it;
+		i++;
+	} else {
+		pthread_mutex_lock(&c->thread->stats.mutex);
+		c->thread->stats.get_misses++;
+		c->thread->stats.get_cmds++;
+		pthread_mutex_unlock(&c->thread->stats.mutex);
+		MEMCACHED_COMMAND_GET(c->sfd, key, nkey, -1, 0);
+	}
+
+ENDOFWHILE:
+
+	/*
+	 * If the command string hasn't been fully processed, get the next set
+	 * of tokens.
+	 */
+	/*if(key_token->value != NULL) {
+		ntokens = tokenize_command(key_token->value, tokens, MAX_TOKENS);
+		key_token = tokens;
+	}*/
+	c->icurr = c->ilist;
+	c->ileft = i;
+	if (return_cas) {
+		c->suffixcurr = c->suffixlist;
+		c->suffixleft = i;
+	}
+	if (settings.verbose > 1)
+		fprintf(stderr, ">%d END\n", c->sfd);
+	/*
+	   If the loop was terminated because of out-of-memory, it is not
+	   reliable to add END\r\n to the buffer, because it might not end
+	   in \r\n. So we send SERVER_ERROR instead.
+	 */
+	if (/*key_token->value != NULL || */add_iov(c, "END\r\n", 5) != 0
+		|| (IS_UDP(c->transport) && build_udp_headers(c) != 0)) {
+			out_string(c, "SERVER_ERROR out of memory writing get response(*)");
+	}
+	else {
+		conn_set_state(c, conn_mwrite);
+		c->msgcurr = 0;
+	}
+	return;
+}
+
+/* Viz: Definition of rget sub command processor. Invoked by PHP getMulti with rget as one dummy key */
+static inline void process_rget_sub_command(conn *c, token_t *tokens, size_t ntokens, bool return_cas) {
+	char *key;
+	size_t nkey;
+	int i = 0, j, k;
+	item *it, *orig_it;
+	token_t *key_token = &tokens[KEY_TOKEN];
+	char *suffix;
+	const int max_call_count_length = 2;
+	char call_count_string[8];
+	int call_count = -1;
+	token_t *call_count_token = &tokens[VIZ_RGET_CC_TOKEN];
+	char value[VIZ_MAX_VALUE_LEN], value2key[VIZ_MAX_VALUE_LEN];
+	char *value_ptr;
+	int value_len;
+	assert(c != NULL);
+
+	key = key_token->value;
+	nkey = key_token->length;
+	if(nkey > KEY_MAX_LENGTH) {
+		out_string(c, "CLIENT_ERROR bad command line format");
+		return;
+	}
+	
+	/* Viz: We differ at this point from process_get_command
+	 *		Instead of a single item_get, we call it multiple times
+	 *		Each call has key as the value extracted from previous call
+	 */
+	if(call_count_token->length > max_call_count_length){
+		out_string(c, "CLIENT_ERROR call count argument is too long");
+		return;
+	}
+	for(j = 0, k = 0;j < call_count_token->length;j++){
+		if(call_count_token->value[j] < '0' || call_count_token->value[j] > '9'){
+			out_string(c, "CLIENT_ERROR bad call count argument format");
+			return;
+		}
+		call_count_string[k++] = call_count_token->value[j];
+	}
+	call_count_string[k] = 0;
+	call_count = atoi(call_count_string);
+	fprintf(stdout, "Call count %d\n", call_count);
+
+	k = 1;
+	do{
+		it = item_get(key, nkey);
+		if(!it)
+			break;
+		if(k == 1)
+			orig_it = it; // Keep the original item pointer, later needed for output
+		value_ptr = ITEM_data(it);
+		value_len = it->nbytes - 2; // There are CR and LF in the end
+		if(value_len > VIZ_MAX_VALUE_LEN - 1){
+			out_string(c, "CLIENT_ERROR value is too long for recursive get");
+			return;
+		}
+		for(j = 0;j < value_len;j++)
+			value[j] = value_ptr[j];
+		value[j] = 0;
+		//fprintf(stdout, "Value found %s\n", value);
+		nkey = (size_t) value_len;
+		memcpy(value2key, value, value_len);
+		key = value2key;
+	}while(k++ < call_count);
+
+	/* Viz: Rest of the function proceeds almost like process_get_item except few mods in the end */
+
+	if (settings.detail_enabled) {
+		stats_prefix_record_get(key, nkey, NULL != it);
+	}
+	if (it) {
+		if (i >= c->isize) {
+			item **new_list = realloc(c->ilist, sizeof(item *) * c->isize * 2);
+			if (new_list) {
+				c->isize *= 2;
+				c->ilist = new_list;
+			} else {
+				item_remove(it);
+				goto ENDOFWHILE;
+			}
+		}
+		/*
+		 * Construct the response. Each hit adds three elements to the
+		 * outgoing data list:
+		 *   "VALUE "
+		 *   key
+		 *   " " + flags + " " + data length + "\r\n" + data (with \r\n)
+		 */
+		if (return_cas){
+			MEMCACHED_COMMAND_GET(c->sfd, ITEM_key(it), it->nkey, it->nbytes, ITEM_get_cas(it));
+			/* Goofy mid-flight realloc. */
+			if (i >= c->suffixsize) {
+				char **new_suffix_list = realloc(c->suffixlist, sizeof(char *) * c->suffixsize * 2);
+				if (new_suffix_list) {
+					c->suffixsize *= 2;
+					c->suffixlist  = new_suffix_list;
+				} else {
+					item_remove(it);
+					goto ENDOFWHILE;
+				}
+			}
+			suffix = cache_alloc(c->thread->suffix_cache);
+			if (suffix == NULL) {
+				out_string(c, "SERVER_ERROR out of memory making CAS suffix");
+				item_remove(it);
+				return;
+			}
+			*(c->suffixlist + i) = suffix;
+			int suffix_len = snprintf(suffix, SUFFIX_SIZE,
+									" %llu\r\n",
+									(unsigned long long)ITEM_get_cas(it));
+			if (add_iov(c, "VALUE ", 6) != 0 ||
+				add_iov(c, ITEM_key(it), it->nkey) != 0 ||
+				add_iov(c, ITEM_suffix(it), it->nsuffix - 2) != 0 ||
+				add_iov(c, suffix, suffix_len) != 0 ||
+				add_iov(c, ITEM_data(it), it->nbytes) != 0){
+					item_remove(it);
+					goto ENDOFWHILE;
+			}
+		}
+		else
+		{
+			MEMCACHED_COMMAND_GET(c->sfd, ITEM_key(it), it->nkey, it->nbytes, ITEM_get_cas(it));
+			if (add_iov(c, "VALUE ", 6) != 0\
+				|| add_iov(c, ITEM_key(orig_it), orig_it->nkey) != 0
+				|| add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes) != 0){
+					item_remove(it);
+					goto ENDOFWHILE;
+			}
+		}
+		if (settings.verbose > 1)
+			fprintf(stderr, ">%d sending key %s\n", c->sfd, ITEM_key(it));
+		/* item_get() has incremented it->refcount for us */
+		pthread_mutex_lock(&c->thread->stats.mutex);
+		c->thread->stats.slab_stats[it->slabs_clsid].get_hits++;
+		c->thread->stats.get_cmds++;
+		pthread_mutex_unlock(&c->thread->stats.mutex);
+		item_update(it);
+		*(c->ilist + i) = it;
+		i++;
+	} else {
+		pthread_mutex_lock(&c->thread->stats.mutex);
+		c->thread->stats.get_misses++;
+		c->thread->stats.get_cmds++;
+		pthread_mutex_unlock(&c->thread->stats.mutex);
+		MEMCACHED_COMMAND_GET(c->sfd, key, nkey, -1, 0);
+	}
+
+ENDOFWHILE:
+
+	c->icurr = c->ilist;
+	c->ileft = i;
+	if (return_cas) {
+		c->suffixcurr = c->suffixlist;
+		c->suffixleft = i;
+	}
+	if (settings.verbose > 1)
+		fprintf(stderr, ">%d END\n", c->sfd);
+	/*
+	   If the loop was terminated because of out-of-memory, it is not
+	   reliable to add END\r\n to the buffer, because it might not end
+	   in \r\n. So we send SERVER_ERROR instead.
+	 */
+	if (add_iov(c, "END\r\n", 5) != 0
+		|| (IS_UDP(c->transport) && build_udp_headers(c) != 0)) {
+			out_string(c, "SERVER_ERROR out of memory writing get response(*)");
+	}
+	else {
+		conn_set_state(c, conn_mwrite);
+		c->msgcurr = 0;
+	}
+	return;
+}
+
+static void replace_after_merge(conn *c) {
+	assert(c != NULL);
+
+	item *it = c->item;
+	int comm = c->cmd;
+	enum store_item_type ret;
+
+	pthread_mutex_lock(&c->thread->stats.mutex);
+	c->thread->stats.slab_stats[it->slabs_clsid].set_cmds++;
+	pthread_mutex_unlock(&c->thread->stats.mutex);
+
+	ret = store_item(it, comm, c);
+
+	switch (ret) {
+	case STORED:
+		out_string(c, "STORED");
+		break;
+	case EXISTS:
+		out_string(c, "EXISTS");
+		break;
+	case NOT_FOUND:
+		out_string(c, "NOT_FOUND");
+		break;
+	case NOT_STORED:
+		out_string(c, "NOT_STORED");
+		break;
+	default:
+		out_string(c, "SERVER_ERROR Unhandled storage type.");
+	}
+    item_remove(c->item);	/* release the c->item reference */
+    c->item = 0;
+}
+
+static inline void process_merge_sub_command(conn *c, token_t *tokens, size_t ntokens, bool return_cas) {
+	char *key;
+	size_t nkey;
+	int j;
+	item *it, *new_it;
+	token_t *key_token = &tokens[KEY_TOKEN];
+	const int max_function_id_length = 32;
+	char function_id[33];
+	token_t *function_id_token = &tokens[VIZ_MERGE_FID_TOKEN];
+	char new_value[VIZ_MAX_VALUE_LEN];
+	token_t *new_value_token = &tokens[VIZ_MERGE_VAL_TOKEN];
+	char value[VIZ_MAX_VALUE_LEN];
+	char *value_ptr;
+	int value_len = 0;
+
+	char mvalue[VIZ_MAX_VALUE_LEN];
+	int mvalue_len;
+	rel_time_t exptime;
+	uint8_t flags;
+
+	assert(c != NULL);
+
+	key = key_token->value;
+	nkey = key_token->length;
+	if(nkey > KEY_MAX_LENGTH) {
+		out_string(c, "CLIENT_ERROR bad command line format");
+		return;
+	}
+	
+	if(function_id_token->length > max_function_id_length){
+		out_string(c, "CLIENT_ERROR function id argument is too long");
+		return;
+	}
+	memcpy(function_id, function_id_token->value, function_id_token->length);
+	function_id[function_id_token->length] = 0;
+	//fprintf(stdout, "Function id %s with length %d\n", function_id, (int)function_id_token->length);
+
+	if(new_value_token->length > VIZ_MAX_VALUE_LEN){
+		out_string(c, "CLIENT_ERROR new value argument is too long");
+		return;
+	}
+	memcpy(new_value, new_value_token->value, new_value_token->length);
+	new_value[new_value_token->length] = 0;
+	//fprintf(stdout, "New value %s with length %d\n", new_value, (int)new_value_token->length);
+
+	it = item_get(key, nkey);
+	if(it){
+		value_ptr = ITEM_data(it);
+		value_len = it->nbytes - 2; // There are CR and LF in the end
+		if(value_len > VIZ_MAX_VALUE_LEN - 1){
+			out_string(c, "CLIENT_ERROR value is too long for recursive get");
+			return;
+		}
+		for(j = 0;j < value_len;j++)
+			value[j] = value_ptr[j];
+		value[j] = 0;
+		//fprintf(stdout, "Old value found %s\n", value);
+	}
+
+	/* Viz: Applying the merging function - for now some dummy actions */
+	//fprintf(stdout, "Calling function %s with old and new values\n", function_id);
+	memcpy(mvalue, value, value_len);
+	mvalue_len = value_len;
+	memcpy(mvalue + value_len, new_value, new_value_token->length);
+	mvalue_len += new_value_token->length;
+	mvalue[mvalue_len++] = '\r';
+	mvalue[mvalue_len++] = '\n';
+	
+	/* Viz: Creating a new item - exptime and flags are hard-coded :-( */
+	exptime = 0;//it->exptime;//FIXME
+	flags = 0;//it->it_flags;
+	//fprintf(stdout, "Setting %d flags and %d expiry time\n", (int)flags, (int)exptime);
+	new_it = item_alloc(key, nkey, flags, exptime, mvalue_len);
+
+	/* Viz: Replacing old item with the new one - following similar logic as process_update_command */
+	c->item = new_it;
+    c->ritem = ITEM_data(new_it);
+	c->rlbytes = new_it->nbytes;
+	c->cmd = NREAD_SET;
+	memcpy(c->ritem, mvalue, mvalue_len);
+	replace_after_merge(c);
+}
+/* Viz: END */
+
 static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, bool handle_cas) {
     char *key;
     size_t nkey;
@@ -2869,7 +3351,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     item *it;
 
     assert(c != NULL);
-
+	
     set_noreply_maybe(c, tokens, ntokens);
 
     if (tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
@@ -3242,13 +3724,32 @@ static void process_command(conn *c, char *command) {
     }
 
     ntokens = tokenize_command(command, tokens, MAX_TOKENS);
+	/* Viz : Debug output - all tokens of a command */
+	/*int viz_i;
+	fprintf(stdout, "Command totkens[%d]: ", (int)ntokens);
+	for(viz_i = 0;viz_i < ntokens;viz_i++){
+		fprintf(stdout, "%s ", tokens[viz_i].value);
+	}
+	fprintf(stdout, "\n");*/
+	/* Viz: END */
     if (ntokens >= 3 &&
-        ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
-         (strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
+		((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
+		(strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
+		
+		if(ntokens == 5 && (strcmp(tokens[VIZ_COMMAND_TOKEN].value, "rget") == 0)){
+			/* Viz: This is to support the PHP getMulti call with rget as a dummy key */
+			process_rget_sub_command(c, tokens, ntokens, false);
+		}else if(ntokens == 6 && (strcmp(tokens[VIZ_COMMAND_TOKEN].value, "merge") == 0)){
+			/* Viz: This is to support the PHP getMulti call with merge as a dummy key */
+			process_merge_sub_command(c, tokens, ntokens, false);
+		}else{
+        	process_get_command(c, tokens, ntokens, false);
+		}
 
-        process_get_command(c, tokens, ntokens, false);
-
-    } else if ((ntokens == 6 || ntokens == 7) &&
+    }else if(ntokens == 4 && (strcmp(tokens[COMMAND_TOKEN].value, "rget") == 0)){
+		/* Viz: Adding support for rget command which is recursive get */
+		process_rget_command(c, tokens, ntokens, false);
+	}else if ((ntokens == 6 || ntokens == 7) &&
                ((strcmp(tokens[COMMAND_TOKEN].value, "add") == 0 && (comm = NREAD_ADD)) ||
                 (strcmp(tokens[COMMAND_TOKEN].value, "set") == 0 && (comm = NREAD_SET)) ||
                 (strcmp(tokens[COMMAND_TOKEN].value, "replace") == 0 && (comm = NREAD_REPLACE)) ||
