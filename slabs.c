@@ -21,6 +21,12 @@
 #include <assert.h>
 #include <pthread.h>
 
+/* Viz: ... */
+#include <sys/mman.h>
+item **return_heads_ptr(void);
+item **return_tails_ptr(void);
+/* Viz: END */
+
 /* powers-of-N allocation structures */
 
 typedef struct {
@@ -93,22 +99,69 @@ unsigned int slabs_clsid(const size_t size) {
  * accordingly.
  */
 void slabs_init(const size_t limit, const double factor, const bool prealloc) {
-    int i = POWER_SMALLEST - 1;
+    int i = POWER_SMALLEST - 1, ret;
     unsigned int size = sizeof(item) + settings.chunk_size;
+	FILE *fp = 0;
 
     mem_limit = limit;
 
     if (prealloc) {
-        /* Allocate everything in a big chunk with malloc */
-        mem_base = malloc(mem_limit);
-        if (mem_base != NULL) {
-            mem_current = mem_base;
+		/* Viz: Try mmap */
+		if(settings.dump_on_quit || settings.restore){
+			mmap_fd = open(dump_file_path, O_RDWR);
+			if(mmap_fd){
+				if(settings.restore){
+					if((fp = fopen(mmapptr_file_path, "r")) != NULL){
+						fscanf(fp, "%p\n", &mmap_fixed_location);
+						fclose(fp);
+						mem_base = (void*) mmap(mmap_fixed_location, mem_limit, PROT_WRITE, MAP_SHARED, mmap_fd, 0);
+					}else{
+						fprintf(stderr, "ERROR: Unable to retrieve mmap location\n");
+						mem_base = MAP_FAILED;
+					}
+				}else{
+					mem_base = (void*) mmap(0, mem_limit, PROT_WRITE, MAP_SHARED, mmap_fd, 0);
+					if((fp = fopen(mmapptr_file_path, "w")) != NULL){
+						fprintf(fp, "%p\n", mem_base);
+						fclose(fp);
+					}else{
+						fprintf(stderr, "ERROR: Unable to save mmap location\n");
+					}
+				}
+				if(mem_base == MAP_FAILED){
+					fprintf(stderr, "Error: Unable to do mmap\n");
+					close(mmap_fd);
+				}else{
+					fprintf(stdout, "mmap to address %p\n", mem_base);
+				}
+			}else{
+				fprintf(stderr, "Error: Unable to open dump file\n");
+			}
+		/* Viz: END */
+		}else{
+	        /* Allocate everything in a big chunk with malloc */
+    	    mem_base = malloc(mem_limit);
+		}
+       	if (mem_base != NULL) {
+           	mem_current = mem_base;
             mem_avail = mem_limit;
-        } else {
-            fprintf(stderr, "Warning: Failed to allocate requested memory in"
-                    " one large chunk.\nWill allocate in smaller chunks\n");
-        }
+   	    } else {
+       	    fprintf(stderr, "Warning: Failed to allocate requested memory in"
+           	        " one large chunk.\nWill allocate in smaller chunks\n");
+       	}
     }
+	/* Viz: Need to bypass the following few lines of code if we are restoring */
+	if(settings.restore){
+		if((ret = restore_metadata()) > 0){
+			// Need to set value to power_largest here
+			power_largest = ret;
+			metadata_restored = ret;
+			return;
+		}else{
+			fprintf(stderr, "Error: Unable to restore meta data\n");
+		}
+	}
+	/* Viz: If restore fails - we do normal initialization */
 
     memset(slabclass, 0, sizeof(slabclass));
 
@@ -175,8 +228,12 @@ static int grow_slab_list (const unsigned int id) {
     slabclass_t *p = &slabclass[id];
     if (p->slabs == p->list_size) {
         size_t new_size =  (p->list_size != 0) ? p->list_size * 2 : 16;
-        void *new_list = realloc(p->slab_list, new_size * sizeof(void *));
+		/* Viz: A realloc is done here on the slab_list
+				Need to save this dynamic array with meta data
+		*/
+		void *new_list = realloc(p->slab_list, new_size * sizeof(void *));
         if (new_list == 0) return 0;
+		//fprintf(stdout, "Growing slab class %u to size %u\n", id, (unsigned int)new_size);
         p->list_size = new_size;
         p->slab_list = new_list;
     }
@@ -242,6 +299,7 @@ static void *do_slabs_alloc(const size_t size, unsigned int id) {
         if (it->next) it->next->prev = 0;
         p->sl_curr--;
         ret = (void *)it;
+		//fprintf(stdout, "Slab class %u: slot = %p sl_curr = %u\n", id, p->slots, p->sl_curr);
     }
 
     if (ret) {
@@ -880,3 +938,156 @@ void stop_slab_maintenance_thread(void) {
     pthread_join(maintenance_tid, NULL);
     pthread_join(rebalance_tid, NULL);
 }
+
+/* Viz: Memory dump restore functions */
+void dump_metadata(){
+	int i, j, count = 0;
+	FILE *fp = fopen(metadata_file_path, "w");
+	item **heads = return_heads_ptr();
+	item **tails = return_tails_ptr();
+	if(!fp){
+		fprintf(stderr, "Error: Unable to dump meta data\n");
+		return;
+	}
+	fprintf(fp, "%d\n", power_largest);
+	slabclass_t *md = slabclass;
+	for(i = POWER_SMALLEST; i <= power_largest; i++){
+		if(md+i != NULL)
+			fprintf(fp, "%d\n", i);
+		else
+			continue;
+		fprintf(fp, "%u\n", (md+i)->size);
+		fprintf(fp, "%u\n", (md+i)->perslab);
+		// slots points to the tail of item pointer linked list?
+		// If this is the case, we need to get the head of list through some other way
+		fprintf(fp, "%p\n", (md+i)->slots);
+		fprintf(fp, "%u\n", (md+i)->sl_curr);
+		fprintf(fp, "%u\n", (md+i)->slabs);
+		fprintf(fp, "%u\n", (md+i)->list_size);
+		fprintf(fp, "%p\n", (void*)((md+i)->slab_list));
+		for(j = 0;j < (md+i)->slabs;j++)
+			fprintf(fp, "%p\n", (void*)((md+i)->slab_list[j]));
+		fprintf(fp, "%u\n", (md+i)->killing);
+		fprintf(fp, "%u\n", (unsigned int)((md+i)->requested));
+		count++;
+	}
+	// Now save the head and tail pointers fo each slab class
+	for(i = POWER_SMALLEST; i <= power_largest;i++){
+		fprintf(fp, "%p\n", (void*)heads[i]);
+		fprintf(fp, "%p\n", (void*)tails[i]);
+		if(heads[i] || tails[i]){
+			//fprintf(stdout, "Slab %d - heads %p and tails %p\n", i, (void*)heads[i], (void*)tails[i]);
+		}
+	}
+	fclose(fp);
+	fprintf(stdout, "Meta data stored\n");
+}
+int restore_metadata(){
+	int i, j, flag = 1, ret, id, count = 0;
+	unsigned int requested;
+	void *temp;
+	item **heads = return_heads_ptr();
+	item **tails = return_tails_ptr();
+	FILE *fp = fopen(metadata_file_path, "r");
+	if(!fp){
+		fprintf(stderr, "Error: Unable to restore meta data\n");
+		return 0;
+	}
+	if((ret = fscanf(fp, "%d", &count)) == EOF){
+		fprintf(stderr, "Error: Meta data count not found\n");
+		flag = EOF;
+	}
+	slabclass_t *md = slabclass;
+	for(i = POWER_SMALLEST; i <= count && flag != EOF; i++){
+		if((ret = fscanf(fp, "%d", &id)) == EOF)
+			break;
+		if(id != i){
+			fprintf(stderr, "Error: slabclass %d not found in metadata\n", i);
+			flag = EOF;
+			break;
+		}
+		if((ret = fscanf(fp, "%u", &((md+i)->size))) == EOF)
+			break;
+		if((ret = fscanf(fp, "%u", &((md+i)->perslab))) == EOF)
+			break;
+		if((ret = fscanf(fp, "%p", &((md+i)->slots))) == EOF)
+			break;
+		if((ret = fscanf(fp, "%u", &((md+i)->sl_curr))) == EOF)
+			break;
+		if((ret = fscanf(fp, "%u", &((md+i)->slabs))) == EOF)
+			break;
+		if((ret = fscanf(fp, "%u", &((md+i)->list_size))) == EOF)
+			break;
+		if((ret = fscanf(fp, "%p", &temp)) == EOF)
+			break;
+		//(md+i)->slab_list = (void**)temp2;
+		(md+i)->slab_list = (void**)calloc((size_t)((md+i)->list_size), sizeof(void*));
+		for(j = 0;j < (md+i)->slabs;j++){
+			if((ret = fscanf(fp, "%p", &((md+i)->slab_list[j]))) == EOF){
+				flag = EOF;
+				break;
+			}
+		}
+		if(flag == EOF)
+			break;
+		if((ret = fscanf(fp, "%u", &((md+i)->killing))) == EOF)
+			break;
+		if((ret = fscanf(fp, "%u", &requested)) == EOF)
+			break;
+		(md+i)->requested = (size_t)requested;
+	}
+	if(ret != EOF){
+		for(i = POWER_SMALLEST;i < count;i++){
+			if((ret = fscanf(fp, "%p", &temp)) == EOF)
+				break;
+			heads[i] = (item*)temp;
+			if((ret = fscanf(fp, "%p", &temp)) == EOF)
+				break;
+			tails[i] = (item*)temp;
+			if(heads[i] || tails[i]){
+				//fprintf(stdout, "Slab %d - heads %p and tails %p\n", i, (void*)heads[i], (void*)tails[i]);
+			}
+		}
+	}
+	fclose(fp);
+	if(ret == EOF || flag == EOF)
+		return 0;
+	fprintf(stdout, "Meta data restored\n");
+	//restore_hash_table(count);
+	//fprintf(stdout, "Hash table restored\n");
+	return count;
+}
+
+void view_items_slabwise(){
+	int i, count, len;
+	item *it;
+	char *ptr;
+	const int max_length = 1024;
+	char tmpkey[max_length];
+	char tmpdata[max_length];
+	item **heads = return_heads_ptr();
+	for(i = POWER_SMALLEST;i < power_largest;i++){
+		count = 0;
+		it = heads[i];
+		while(it != NULL){
+			if(count == 0)
+				fprintf(stdout, "Slabclass %d\n", i);
+			ptr = ITEM_key(it);
+			len = (it->nkey > max_length - 1) ? (max_length - 1) : it->nkey;
+			memcpy(tmpkey, ptr, len);
+			tmpkey[len] = 0;
+			ptr = ITEM_data(it);
+			len = (it->nbytes - 2 > max_length - 1) ? (max_length - 1) : (it->nbytes - 2);
+			memcpy(tmpdata, ptr, len);
+			tmpdata[len] = 0;
+			fprintf(stdout, "  %s -> %s\n", tmpkey, tmpdata);
+			it = it->next;
+			count++;
+			if(count > 100){
+				fprintf(stdout, " too many items\n");
+				break;
+			}
+		}
+	}
+}
+/* Viz: END */

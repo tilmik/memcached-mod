@@ -46,4 +46,9 @@ enum reassign_result_type slabs_reassign(int src, int dst);
 void slabs_rebalancer_pause(void);
 void slabs_rebalancer_resume(void);
 
+/* Viz: Declarations */
+void dump_metadata(void);
+int restore_metadata(void);
+void view_items_slabwise(void);
+/* Viz: END */
 #endif

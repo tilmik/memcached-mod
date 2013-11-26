@@ -97,6 +97,15 @@ static int add_msghdr(conn *c);
 
 static void conn_free(conn *c);
 
+/* Viz: Memory dump shared variable */
+const char dump_file_path[80] = "/home/vizury/mcmem.dump";
+void *mmap_fixed_location = 0;
+int mmap_fd = 0;
+const char metadata_file_path[80] = "/home/vizury/mcmeta.txt";
+int metadata_restored = 0;
+const char mmapptr_file_path[80] = "/home/vizury/mcmaddr.txt";
+/* Viz: END */
+
 /** exported globals **/
 struct stats stats;
 struct settings settings;
@@ -225,6 +234,10 @@ static void settings_init(void) {
     settings.hashpower_init = 0;
     settings.slab_reassign = false;
     settings.slab_automove = 0;
+
+	/* Viz: variable initialization for handling memory dump restore */
+	settings.dump_on_quit = false;
+	settings.restore = false;
 }
 
 /*
@@ -3742,6 +3755,8 @@ static void process_command(conn *c, char *command) {
 		}else if(ntokens == 6 && (strcmp(tokens[VIZ_COMMAND_TOKEN].value, "merge") == 0)){
 			/* Viz: This is to support the PHP getMulti call with merge as a dummy key */
 			process_merge_sub_command(c, tokens, ntokens, false);
+		}else if(ntokens == 3 && (strcmp(tokens[KEY_TOKEN].value, "slab") == 0)){
+			view_items_slabwise();
 		}else{
         	process_get_command(c, tokens, ntokens, false);
 		}
@@ -5115,6 +5130,10 @@ static void remove_pidfile(const char *pid_file) {
 
 static void sig_handler(const int sig) {
     printf("SIGINT handled.\n");
+	if(settings.dump_on_quit)
+		dump_metadata();
+	if(mmap_fd)
+		close(mmap_fd);
     exit(EXIT_SUCCESS);
 }
 
@@ -5275,6 +5294,7 @@ int main (int argc, char **argv) {
           "I:"  /* Max item size */
           "S"   /* Sasl ON */
           "o:"  /* Extended generic options */
+		  "V:"	/* Viz: indicator of memory dump and restore */
         ))) {
         switch (c) {
         case 'a':
@@ -5388,14 +5408,27 @@ int main (int argc, char **argv) {
             settings.detail_enabled = 1;
             break;
         case 'L' :
-            if (enable_large_pages() == 0) {
+            /* Viz: Changes for memory dump feature - preallocating regardless of page size */
+			preallocate = true;
+			if(enable_large_pages() == 0){
+				fprintf(stdout, "Large page is not enabled - doing preallocate anyway\n");
+			}
+			/* Viz: END */
+			/*if (enable_large_pages() == 0) {
                 preallocate = true;
             } else {
                 fprintf(stderr, "Cannot enable large pages on this system\n"
                     "(There is no Linux support as of this version)\n");
                 return 1;
-            }
+            }*/
             break;
+		case 'V' :
+			/* Viz : Memory dump and restore */
+			if(strcmp(optarg, "dump") == 0 || strcmp(optarg, "both") == 0)
+				settings.dump_on_quit = true;
+			if(strcmp(optarg, "restore") == 0 || strcmp(optarg, "both") == 0)
+				settings.restore = true;
+			break;
         case 'C' :
             settings.use_cas = false;
             break;
@@ -5630,8 +5663,12 @@ int main (int argc, char **argv) {
     assoc_init(settings.hashpower_init);
     conn_init();
     slabs_init(settings.maxbytes, settings.factor, preallocate);
-
-    /*
+	/* Viz: We restore the hashtable here */
+	if(/*metadata_restored > */0)
+		call_restore_hash_table(metadata_restored);
+	/* Viz: END */
+    
+	/*
      * ignore SIGPIPE signals; we can use errno == EPIPE if we
      * need that information
      */
@@ -5642,7 +5679,7 @@ int main (int argc, char **argv) {
     /* start up worker threads if MT mode */
     thread_init(settings.num_threads, main_base);
 
-    if (start_assoc_maintenance_thread() == -1) {
+	if (start_assoc_maintenance_thread() == -1) {
         exit(EXIT_FAILURE);
     }
 
@@ -5731,6 +5768,13 @@ int main (int argc, char **argv) {
     }
 
     stop_assoc_maintenance_thread();
+	
+	/* Viz: Closing the mmamp fd if open */
+	if(settings.dump_on_quit)
+		dump_metadata();
+	if(mmap_fd)
+		close(mmap_fd);
+	/* Viz: END */
 
     /* remove the PID file if we're a daemon */
     if (do_daemonize)

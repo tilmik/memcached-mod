@@ -307,7 +307,21 @@ struct settings {
     bool slab_reassign;     /* Whether or not slab reassignment is allowed */
     int slab_automove;     /* Whether or not to automatically move slabs */
     int hashpower_init;     /* Starting hash power level */
+
+	/* Viz: Variables for memory dump and restore */
+	bool dump_on_quit;
+	bool restore;
 };
+
+extern const char dump_file_path[80];
+extern void *mmap_fixed_location;
+extern int mmap_fd;
+extern const char metadata_file_path[80];
+extern int metadata_restored;
+extern const char mmapptr_file_path[80];
+void restore_hash_table(int);
+void call_restore_hash_table(int);
+/* Viz: END */
 
 extern struct stats stats;
 extern time_t process_started;

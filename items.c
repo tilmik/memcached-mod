@@ -13,6 +13,12 @@
 #include <time.h>
 #include <assert.h>
 
+/* Viz: ... */
+item **return_heads_ptr(void);
+item **return_tails_ptr(void);
+//void restore_hash_table(int);
+/* Viz: END */
+
 /* Forward Declarations */
 static void item_link_q(item *it);
 static void item_unlink_q(item *it);
@@ -607,3 +613,37 @@ void do_item_flush_expired(void) {
         }
     }
 }
+
+/* Viz: Functions to return heads and tails ptr to dump / restore metadata functions */
+item **return_heads_ptr(){
+	return heads;
+}
+
+item **return_tails_ptr(){
+	return tails;
+}
+
+void restore_hash_table(int count){
+	int i, it_count = 0;
+	item *it, *old_it;
+	fprintf(stdout, "Starting hash table restore\n");
+	for(i = POWER_SMALLEST;i < count;i++){
+		it = heads[i];
+		it_count = 0;
+		while(it != NULL){
+			fprintf(stdout, "Slab class %d - item %p\n", i, (void*)it);
+			old_it = it;
+			fprintf(stdout, "it before link %p -> %p\n", (void*)it, (void*)(it->next));
+			item_link(it);
+			//item_remove(it);
+			fprintf(stdout, "it after link %p -> %p\n", (void*)it, (void*)(it->next));
+			it = old_it;
+			it = it->next;
+			it_count++;
+			if(it_count > 5)
+				break;
+		}
+	}
+	fprintf(stdout, "Hash table populated with %d items\n", it_count);
+}
+/* Viz: END */
