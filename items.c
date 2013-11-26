@@ -622,8 +622,7 @@ item **return_heads_ptr(){
 item **return_tails_ptr(){
 	return tails;
 }
-
-void restore_hash_table(int count){
+/*void restore_hash_table(int count){
 	int i, it_count = 0;
 	item *it, *old_it;
 	fprintf(stdout, "Starting hash table restore\n");
@@ -642,6 +641,33 @@ void restore_hash_table(int count){
 			it_count++;
 			if(it_count > 5)
 				break;
+		}
+	}
+	fprintf(stdout, "Hash table populated with %d items\n", it_count);
+}*/
+void restore_hash_table(int count){
+	int i, it_count = 0;
+	item *it;
+	char *it_key;
+	uint32_t hv;
+	for(i = POWER_SMALLEST;i < count;i++){
+		it = heads[i];
+		while(it != NULL){
+			//fprintf(stdout, "Slab class %d - item %p\n", i, (void*)it);
+			//fprintf(stdout, "it before link %p -> %p\n", (void*)it, (void*)(it->next));
+			it_key = ((char*)&((it)->data)) + (((it)->it_flags & 2) ? sizeof(uint64_t) : 0);
+			hv = hash(it_key, it->nkey, 0);
+			it->time = current_time;
+			STATS_LOCK();
+			stats.curr_bytes += ITEM_ntotal(it);
+			stats.curr_items += 1;
+			stats.total_items += 1;
+			STATS_UNLOCK();
+			assoc_insert(it, hv);
+			//item_remove(it);
+			//fprintf(stdout, "it after link %p -> %p\n", (void*)it, (void*)(it->next));
+			it = it->next;
+			it_count++;
 		}
 	}
 	fprintf(stdout, "Hash table populated with %d items\n", it_count);

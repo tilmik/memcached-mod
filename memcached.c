@@ -5664,8 +5664,8 @@ int main (int argc, char **argv) {
     conn_init();
     slabs_init(settings.maxbytes, settings.factor, preallocate);
 	/* Viz: We restore the hashtable here */
-	if(/*metadata_restored > */0)
-		call_restore_hash_table(metadata_restored);
+	if(metadata_restored > 0)
+		restore_hash_table(metadata_restored);
 	/* Viz: END */
     
 	/*

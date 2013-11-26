@@ -843,11 +843,11 @@ void thread_init(int nthreads, struct event_base *main_base) {
 }
 
 /* Viz: Restore hash table entry point */
-void call_restore_hash_table(int count){
+/*void call_restore_hash_table(int count){
 	uint8_t item_lock_type = ITEM_LOCK_GRANULAR;
 	void   *orig_lock_type = pthread_getspecific(item_lock_type_key);
 	pthread_setspecific(item_lock_type_key, &item_lock_type);
 	restore_hash_table(count);
 	pthread_setspecific(item_lock_type_key, orig_lock_type);
-}
+}*/
 /* Viz: END */

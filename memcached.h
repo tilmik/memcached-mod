@@ -320,7 +320,7 @@ extern const char metadata_file_path[80];
 extern int metadata_restored;
 extern const char mmapptr_file_path[80];
 void restore_hash_table(int);
-void call_restore_hash_table(int);
+//void call_restore_hash_table(int);
 /* Viz: END */
 
 extern struct stats stats;
