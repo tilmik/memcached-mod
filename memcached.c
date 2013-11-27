@@ -98,12 +98,12 @@ static int add_msghdr(conn *c);
 static void conn_free(conn *c);
 
 /* Viz: Memory dump shared variable */
-const char dump_file_path[80] = "/home/vizury/mcmem.dump";
+const char dump_file_path[80] = "/tmp/mcmem.dump";
 void *mmap_fixed_location = 0;
 int mmap_fd = 0;
-const char metadata_file_path[80] = "/home/vizury/mcmeta.txt";
+const char metadata_file_path[80] = "/tmp/mcmeta.txt";
 int metadata_restored = 0;
-const char mmapptr_file_path[80] = "/home/vizury/mcmaddr.txt";
+const char mmapptr_file_path[80] = "/tmp/mcmaddr.txt";
 /* Viz: END */
 
 /** exported globals **/
