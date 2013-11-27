@@ -10,8 +10,4 @@
 .settings
 memcached
 memcached-debug
-compile*
-config*
 temp*
-depcomp
-stamp-h1
