@@ -112,9 +112,13 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
 			if(mmap_fd){
 				if(settings.restore){
 					if((fp = fopen(mmapptr_file_path, "r")) != NULL){
-						fscanf(fp, "%p\n", &mmap_fixed_location);
+						if((ret = fscanf(fp, "%p\n", &mmap_fixed_location)) == EOF)
+							fprintf(stderr, "ERROR: Unable to read previous mmap location - restore failed\n");
 						fclose(fp);
-						mem_base = (void*) mmap(mmap_fixed_location, mem_limit, PROT_WRITE, MAP_SHARED, mmap_fd, 0);
+						if(ret == EOF)
+							mem_base = MAP_FAILED;
+						else
+							mem_base = (void*) mmap(mmap_fixed_location, mem_limit, PROT_WRITE, MAP_SHARED, mmap_fd, 0);
 					}else{
 						fprintf(stderr, "ERROR: Unable to retrieve mmap location\n");
 						mem_base = MAP_FAILED;

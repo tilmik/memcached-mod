@@ -208,7 +208,7 @@ AUTOMAKE = ${SHELL} /home/vizury/Works/memcached-1.4.15/missing --run automake-1
 AWK = mawk
 CC = gcc -std=gnu99
 CCDEPMODE = depmode=gcc3
-CFLAGS = -g -O0 -pthread -pthread -Wall -Werror -pedantic -Wmissing-prototypes -Wmissing-declarations -Wredundant-decls
+CFLAGS = -g -O2 -pthread -pthread -Wall -Werror -pedantic -Wmissing-prototypes -Wmissing-declarations -Wredundant-decls
 CPP = gcc -E
 CPPFLAGS = 
 CYGPATH_W = echo
